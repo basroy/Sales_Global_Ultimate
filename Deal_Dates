@@ -1,0 +1,173 @@
+
+import datetime
+import pandas as pd
+import numpy as np
+import os#, sqlalchemy#, sqlparse
+from calendar import monthrange
+from dateutil.relativedelta import relativedelta
+
+try:
+    print os.path.basename(__file__) + ' start: ' + str(datetime.datetime.now())
+except:
+    print 'start: ' + str(datetime.datetime.now())
+
+##############################################
+# Determine remote or local path
+##############################################
+remote = os.getcwd() == 'C:\Users\basroy\Desktop\ASBI\DPMT\scripts\python'
+local_path = 'data\'
+remote_path =  'data/'
+#    '/home/ubuntu/data/'
+path = remote_path if remote else local_path
+
+#read in data
+dpmt = pd.read_csv(path + 'om_project/dpmt/dpmt_raw_data.csv')
+dpmt['ID_SL'] = dpmt['ID_SL'].fillna(0)
+
+measures = ['CommDealAmount',
+ 'Deal Amount',
+ 'SFDC Deal amount',
+ 'Other NF Deal Amount',
+ 'Duration',
+ 'Other Commit Deal Amount',
+ 'UpsideDeal Amount',
+ 'Subs NF Deal Amount',
+ 'Subs Commit Deal Amount',
+ 'NF Deal Amount',
+ 'Other Upside Deal Amount',
+ 'EXPECTED_SVC_AMT',
+ 'Complete Amount1',
+ 'Resource_Start_T0',
+ 'Subs Upside Deal Amount',
+ 'Total_Hours']
+ 
+for col in measures:
+    dpmt[col] = dpmt[col].astype(str).str.replace(',','').astype(float)
+
+
+#fall back to SFDC dates if DPMT dates are unavailable
+dpmt['Duration Start Date'] = np.where(dpmt['START_DATE'].isnull(), dpmt['START_DATE2'], dpmt['START_DATE'])
+dpmt['Date Flag'] = np.where(dpmt['START_DATE'].isnull(), 'SFDC', 'DPMT')
+
+dpmt['Duration End Date'] = np.where(dpmt['end_date'].isnull(), dpmt['EXPECTED_BOOK_DATE'], dpmt['end_date'])
+dpmt['Date Flag'] = np.where(dpmt['end_date'].isnull(), 'SFDC', dpmt['Date Flag'])
+
+#if start date or end date are missing, fill with current month
+dpmt['Date Flag'] = np.where((dpmt['Duration Start Date'].isnull()) | (dpmt['Duration End Date'].isnull()), 'Missing', dpmt['Date Flag'])
+dpmt['Duration Start Date'] = np.where(dpmt['Duration Start Date'].isnull(), datetime.datetime.today().date(), dpmt['Duration Start Date'])
+dpmt['Duration End Date'] = np.where(dpmt['Duration End Date'].isnull(), datetime.datetime.today().date(), dpmt['Duration End Date'])
+
+#convert fields to date type
+dpmt['Duration Start Date'] = pd.to_datetime(dpmt['Duration Start Date'])
+dpmt['Duration End Date'] = pd.to_datetime(dpmt['Duration End Date'])
+
+#add Start_T0 if available
+#dpmt['Resource_Start_T0'] = pd.to_timedelta(dpmt['Resource_Start_T0'], unit='D').fillna(0)
+dpmt['Duration Start Date'] = dpmt['Duration Start Date'] + pd.to_timedelta(dpmt['Resource_Start_T0'], unit='D').fillna(0)
+
+# if end date < start date, make end date = start date
+dpmt['Duration End Date'] = np.where(dpmt['Duration End Date'] < dpmt['Duration Start Date'], dpmt['Duration Start Date'], dpmt['Duration End Date'])
+
+
+#remove rows if they are missing dates
+#dpmt.dropna(subset=['Duration Start Date', 'Duration End Date'], how='any', inplace=True)
+
+#derive fiscal periods for use in creating the final dataset
+dpmt['Duration Start Period'] = (dpmt['Duration Start Date'].dt.year.astype(int).astype(str) + dpmt['Duration Start Date'].dt.month.astype(str).str.zfill(2)).astype(int)
+dpmt['Duration End Period'] = (dpmt['Duration End Date'].dt.year.astype(int).astype(str) + dpmt['Duration End Date'].dt.month.astype(str).str.zfill(2)).astype(int)
+
+
+dpmt['Days'] = (dpmt['Duration End Date'] - dpmt['Duration Start Date']) / np.timedelta64(1, 'D') + 1 #add 1 to be inclusive of end date
+#dpmt.apply(lambda x: len(pd.bdate_range(x['Duration Start Date'], x['Duration End Date'])), axis=1)
+
+# if duration is negative, set to 0
+dpmt['Duration'] = np.where(dpmt['Duration']<0, 0, dpmt['Duration'])
+#dpmt = dpmt[dpmt['Duration']>0] #only keep incidents with positive duration
+
+
+dpmt['Duration per Day'] = dpmt['Duration'].divide(dpmt['Days'], fill_value=0)
+
+#calculate the daily amount (will use these values to generate the monthly amount below)
+#per RK's request, exclude SFDC Deal Amount from this operation
+daily_measures = [x for x in measures if x<>'Resource_Start_T0']
+#daily_measures = [x for x in measures if 'am' in x.lower() and 'SFDC' not in x]
+
+for col in daily_measures:
+    dpmt['Daily ' + col] = dpmt[col].divide(dpmt['Days'], fill_value=0)
+
+#create the DPMT monthly forecast dataset
+cols = list(dpmt.columns.values)
+incident_ids = set()
+incident_duration_lst = [] #list of dictionaries to form dataframe
+def duration_per_month(row):
+    current_period = row['Duration Start Period']
+    while current_period <= row['Duration End Period']:
+        row_dict = {}
+        
+        for x in cols:
+            row_dict[x] = row[x]
+        
+        row_dict['Forecast Month'] = datetime.datetime.strptime(str(current_period), '%Y%m')
+        
+        if current_period==row['Duration Start Period'] and current_period==row['Duration End Period']: #if the start and end period are the same month, use total number of days
+            days_in_month = row['Days']
+        elif current_period==row['Duration Start Period']: #for the first month, need to check the start date since it is a partial period (length of month - current day in month)
+            days_in_month = (monthrange(row['Duration Start Date'].year, row['Duration Start Date'].month)[1] - row['Duration Start Date'].day) + 1  #add 1 to be inclusive of last day in month
+        elif current_period==row['Duration End Period']: #for last month, only consider the days into month used
+            days_in_month = row['Duration End Date'].day 
+        else: #otherwise take all days in month
+            days_in_month = monthrange(row_dict['Forecast Month'].year, row_dict['Forecast Month'].month)[1]
+        
+        row_dict['Days in Forecast Month'] = days_in_month    
+        row_dict['Forecast Month Duration'] = days_in_month * row['Daily Duration']     
+        row_dict['Forecast Month Total Hours'] = days_in_month * row['Daily Total_Hours']
+        row_dict['Forecast Month FTEs'] = row_dict['Forecast Month Total Hours'] / ((days_in_month/7.0) * 5 * 8) #only interested in business days in month
+        
+        #calculate the monthly amount
+        for col in daily_measures:
+            row_dict['Monthly ' + col] = days_in_month * row_dict['Daily ' + col]
+        
+        #create a flag to include all month rows or just a single row (the initial DPMT data set)
+        row_dict['Single Row Flag'] = current_period == row['Duration Start Period']
+        
+        #need a way to aggregate at the INCIDENT_ID_INC level if there are multiple ID_SLs, so flag the first one you see
+        if row_dict['INCIDENT_ID_INC'] not in incident_ids:
+            incident_ids.update([row_dict['INCIDENT_ID_INC']])
+            row_dict['INCIDENT_ID_INC Flag'] = True
+        else:
+            row_dict['INCIDENT_ID_INC Flag'] = False
+            
+        #add the row to list
+        incident_duration_lst.append(row_dict)
+        
+        #set current perid to the next month
+        next_month = row_dict['Forecast Month'] + relativedelta(months=1)
+        current_period = int(str(next_month.year) + str(next_month.month).zfill(2))       
+        
+    return
+
+dpmt.apply(duration_per_month, axis=1)
+dpmt_duration_months = pd.DataFrame(incident_duration_lst)
+
+#bring in fiscal quarter and period
+fiscal_mapping = pd.read_excel(path + 'mapping_tables/Fiscal Mapping.xlsx')
+fiscal_mapping['Fiscal Quarter ID'] = '20' + fiscal_mapping['Fiscal Quarter'].str[2:4] + fiscal_mapping['Fiscal Quarter'].str[-2:]
+fiscal_mapping.drop([x for x in fiscal_mapping.columns if x not in ['Date','Fiscal Quarter ID','Fiscal Period ID']], axis=1, inplace=True)
+fiscal_mapping.rename(columns={'Date':'Forecast Month', 'Fiscal Quarter ID':'Forecast Fiscal Quarter ID', 'Fiscal Period ID':'Forecast Fiscal Period ID'}, inplace=True)
+
+dpmt_duration_months = pd.merge(dpmt_duration_months, fiscal_mapping, how='left', on='Forecast Month')
+
+
+#export the data
+dpmt_duration_months.to_csv(path + 'om_project/dpmt/dpmt_resource_forecasting.csv')
+
+# Add Refresh Time for DPMT to TDE
+df_finish_time = pd.read_csv(path+'om_project/timestamps/dpmt_time_report.csv')
+current = datetime.datetime.now()
+df_finish_time['DPMT_Resource_Forecasting'] = current
+df_finish_time.to_csv(path+'om_project/timestamps/dpmt_time_report.csv', index=False)
+
+try:
+    print os.path.basename(__file__) + ' end: ' + str(datetime.datetime.now())
+except:
+    print 'end: ' + str(datetime.datetime.now())
