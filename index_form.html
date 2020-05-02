@@ -1,0 +1,43 @@
+{% extends 'base.html' %}
+
+{% block head %}
+<title>User Data</title>
+{% endblock %}
+
+{% block body %}
+<h2> Browse Users Page</h2>   
+
+<h3> This below section is of code works with wtForms</h3>
+<form method="POST" action="{{ url_for('index_form')}}">
+    {{ form.csrf_token }}
+    {{ form.srepname.label }}
+    {{ form.srepname }}
+    {{ form.sreptitle.label }}
+    {{ form.sreptitle }}
+    <br>
+    {{ form.srepcontent.label }}
+    {{ form.srepcontent }} 
+    <br>
+    <input type="submit" value='Post'>
+
+</form>
+
+<h3>This below section is to display all data in the table via dict allsrep</h3>
+    <h1> Display People data contents  </h1>  
+        {% for srep in allsrep %}
+            <ul id="srepname.srepname">
+                <li>
+                    <span class="field-name">User:</span>
+                    <span class="field-value">{{ srep.srepname }}</span>
+                </li>
+                <li>
+                    <span class="field-name">Title:</span>
+                    <span class="field-value">{{ srep.sreptitle }}</span>
+                </li>
+                <li>
+                    <span class="field-name">Content:</span>
+                    <span class="field-value">{{ srep.content }}</span>
+                </li>    
+            </ul>
+        {% endfor %}    
+{% endblock %}
