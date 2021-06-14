@@ -77,7 +77,7 @@ class dsptrx(wx.Frame):
         self.Destroy(True)        
 
     def trxquery(self):
-        conn = cx_Oracle.connect('XXG2CRO/C1sc0bea7@G2CPRD')
+        conn = cx_Oracle.connect('G2C/something@G2CPRD')
         cursor = conn.cursor()
         cursor.execute('Select trx_id, trx_number, Source_trx_id, otm_date, creation_date, last_update_date, deal_id \
                    , trx_usd_value  , source_trx_version_id , otm_batch_id, trx_applied_line_id \
